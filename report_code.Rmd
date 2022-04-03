@@ -1,0 +1,405 @@
+---
+title: 'Проект SQL: Анализ оттока клиентов банка'
+author: "Рахманова Амина, afrakhmanova"
+output: 
+  html_document:
+    code_folding: hide
+    df_print: paged
+---
+
+
+## Задача
+
+Проанализировать данные **оттока клиентов банка** и представить результаты в компактной и понятной форме.
+
++ Выяснить, какие категории клиентов банка не заключают новые договоры.
+
++ Подумать над возможными вариантами развития событий для сокращения оттока и проверить их на моделях.
+
+
+## Анализ
+
+### Данные и логика анализа
+
+Мы исследуем базу данных клиентов банка и имеем следующие таблицы и значения:
+
+```{r message = FALSE, warning=FALSE, comment = ""}
+library(dplyr)
+library(ggplot2)
+library(tidymodels)
+library(rpart.plot)
+library(vip)
+
+library(DBI)
+library(RMariaDB)
+con = dbConnect(RMariaDB::MariaDB(), 
+                user ='studentminor', 
+                password ='DataMinorHSE!2020', 
+                dbname ='bank', 
+                host ='34.88.193.134',
+                port = 3306)
+
+dbListTables(con)
+
+dbListFields(con, "country")
+dbListFields(con, "portfolio")
+dbListFields(con, "profile")
+```
+
+Проверим распределение по оттоку:
+
+```{r message = FALSE, warning=FALSE, comment = ""}
+ex_1 = dbGetQuery(con, "SELECT Exited, COUNT(*) AS n
+           FROM portfolio
+           GROUP BY Exited")
+ex_1
+
+full = dbGetQuery(con, "SELECT Age, Balance, Country, NumOfProducts, HasCrCard, IsActiveMember, Exited
+                  FROM (profile 
+                        INNER JOIN country USING(CountryId) 
+                        INNER JOIN portfolio USING(CustomerId))")
+ex_11 = full %>% group_by(Exited) %>% summarise(num = n())
+ex_11 = round(ex_11$num[2] / sum(ex_11$num) * 100, 2)
+ex_11
+
+ggplot(ex_1) + 
+  geom_bar(aes(x = Exited, y = as.numeric(n)), stat = "identity", fill = "blue", alpha = 0.5) + 
+  theme_bw() + 
+  xlab("Ушел ли клиент") +
+  ylab("Количество клиентов") 
+```
+
+Посмотрим, из каких стран и с каким доходом наши клиенты:
+
+```{r message = FALSE, warning=FALSE, comment = ""}
+dbGetQuery(con, "SELECT Country, COUNT(*) AS n
+           FROM (profile 
+                        INNER JOIN country USING(CountryId) 
+                        INNER JOIN portfolio USING(CustomerId))
+           GROUP BY Country
+           ORDER BY Country")
+```
+
+Клиенты банка из трех стран: Франция, Германия и Испания. Будем рассматривать все три, без изменений.
+
+Что касается дохода, посмотрим основную информацию по заработной плате:
+
+```{r message = FALSE, warning=FALSE, comment = ""}
+dbGetQuery(con, "SELECT EstimatedSalary
+                 FROM (portfolio INNER JOIN profile USING(CustomerId))") %>% summary()
+```
+
+При среднем значении заработной платы в 100000 единиц (предположительно евро, учитывая страны) минимальное всего 11. В целом, по трем странам средняя зарплата составляет более 1000 евро, поэтому стоит отсечь данные ниже этого значения для качественного анализа.
+
+Проверим распределение клиентов банка по возрасту:
+
+```{r message = FALSE, warning=FALSE, comment = ""}
+dbGetQuery(con, "SELECT Age, COUNT(*) AS n
+           FROM (portfolio INNER JOIN profile USING(CustomerId))
+           GROUP BY Age
+           ORDER BY Age")
+```
+
+Распредление количества клиентов по возрасту не очень равномерное. С 24 лет количество клиентов превышает 100, что уже является неплохим показателем для анализа. Тем более в среднем после 23 лет студенты (окончившие бакалавриат) устраиваются на постоянную работу (имеется в виду не подработка, а полная занятость). Пенсионный возраст в исследуемых странах превышает 60 лет, отсечем с этого значения, так как дальше слишком мало показателей большего возраста.
+
+В дальнейшем будем использовать отфильтрованные данные по возрасту от 24 до 60 лет, определяющему основной рабочий класс людей, которые как зарабатывают, так и тратят, что является причиной использования продуктов банка.
+
+Также посмотрим сколько месяцев клиенты пользуются услугами банка:
+
+```{r message = FALSE, warning=FALSE, comment = ""}
+dbGetQuery(con, "SELECT Tenure, COUNT(*) AS n
+           FROM (portfolio INNER JOIN profile USING(CustomerId))
+           GROUP BY Tenure
+           ORDER BY Tenure")
+```
+
+Логично выбрать клиентов, которые подключились не менее месяца назад. Тогда они уже успели оценить качество и пользу услуг данного банка и приняли решение - остаться или уйти.
+
+
+Таким образом, для исследования я отобрала клиентов по нескольким признакам:
+
++ возраст от 23 до 60
+
++ заработная плата больше 1000
+
++ клиент сотрудничает с банком не менее месяца
+
+```{r message = FALSE, warning=FALSE, comment = ""}
+exited = dbGetQuery(con, "SELECT Age, Balance, Country, NumOfProducts, HasCrCard, IsActiveMember, Exited
+                  FROM (profile 
+                        INNER JOIN country USING(CountryId) 
+                        INNER JOIN portfolio USING(CustomerId))
+                  WHERE Age > 23 and Age <= 60 and EstimatedSalary > 1000 and Tenure > 0")
+
+dbDisconnect(con)
+```
+
+Проверим новое распределение оттока в сравнении с начальными показателями:
+
+```{r message = FALSE, warning=FALSE, comment = ""}
+ex_2 = exited %>% group_by(Exited) %>% count()
+ex_2
+
+ex_22 = exited %>% group_by(Exited) %>% summarise(num = n())
+ex_22 = round(ex_22$num[2] / sum(ex_22$num) * 100, 2)
+ex_22
+
+ggplot() + 
+  geom_bar(data = ex_1, aes(x = Exited, y = as.numeric(n)), stat = "identity", fill = "blue", alpha = 0.5) +
+  geom_bar(data = ex_2, aes(x = Exited, y = as.numeric(n)), stat = "identity", fill = "red", alpha = 0.5) +
+  theme_bw() + 
+  xlab("Ушел ли клиент") +
+  ylab("Количество клиентов")
+```
+
+Таким образом в отфильтрованных данных осталось 8777 человек, что больше 85% исходных данных.
+
+В целом, показатели распределения целевой переменной уменьшились. При этом доля ушедших клиентов немного увеличилась на общем фоне, что будет на пользу при прогнозировании.
+
+
+### Модель
+
+Для анализа зависимой переменной Exited (1 - клиент ушел, 0 - остался) я выбрала несколько ключевых на мой взгляд показателей:
+
++ Age - возраст клиента
+
++ Balance - текущий баланс 
+
++ Country - название страны
+
++ NumOfProducts - количество продуктов банка, которыми пользуется клиент (факторная переменная, имеющая 4 уровня)
+
++ HasCrCard - есть ли кредитная карта (фактор, где 1 - да)
+
++ IsActiveMember - активный ли клиент (фактор, где 1 - да)
+
+Так выглядят данные:
+
+```{r message = FALSE, warning=FALSE, comment = ""}
+exited$Country = as.factor(exited$Country)
+exited$NumOfProducts = as.factor(exited$NumOfProducts)
+exited$HasCrCard = as.factor(exited$HasCrCard)
+exited$IsActiveMember = as.factor(exited$IsActiveMember)
+exited$Exited = as.factor(exited$Exited)
+
+head(exited, 5)
+```
+
+Построим модель в виде дерева решений:
+
+```{r message = FALSE, warning=FALSE, comment = ""}
+set.seed(123) 
+split = initial_split(exited, prop = 0.8) 
+train = training(split) 
+test = testing(split)
+
+tree = decision_tree(
+  mode = "classification") %>%
+  set_engine("rpart")
+
+tree.wf = workflow() %>% 
+  add_model(tree) %>% 
+  add_formula(Exited ~.) %>% 
+  fit(data = train)
+
+rpart.plot(tree.wf$fit$fit$fit) 
+```
+
+Оценим качество модели:
+
+```{r message = FALSE, warning=FALSE, comment = ""}
+test = test %>% 
+  mutate(Prediction = predict(tree.wf, test)$.pred_class)
+
+coef_test = test %>% 
+  conf_mat(truth = Exited, estimate = Prediction)  %>% summary() 
+
+coef_test[c(1,3), c(1,3)]
+```
+
+Точность 86%, чувствительность 96% - хорошие показатели модели.
+
+```{r message = FALSE, warning=FALSE, comment = ""}
+train = train %>% 
+  mutate(Prediction = predict(tree.wf, train)$.pred_class)
+
+coef_train = train %>% 
+  conf_mat(truth = Exited, estimate = Prediction)  %>% summary()
+
+coef_train[c(1,3), c(1,3)]
+```
+
+Оценки похожи на метрики тестовых данных, что уже хорошо. 
+
+Оценим также важность признаков:
+
+```{r message = FALSE, warning=FALSE, comment = ""}
+tree.wf %>%
+  extract_fit_parsnip() %>%
+  vip() 
+```
+
+По графику видно, что наибольшее значение имеет возраст клиента и количество продуктов в банке, которыми он пользуется. По дереву также было видно, что изначально клиенты делятся на две категории: моложе 45 лет и страше 45. Причем для первой категории имеет значение только количество имеющихся в банке продуктов, а для второй - несколько разных признаков. Так как изменить возраст клиентов мы не в силах, а можем только привлечь новых, что является уже другой задачей, рассмотрим иные варианты снижения уровня оттока.
+
+Посмотрим, где отток выше в распределении количества продуктов банка:
+
++ для тестовой выборки 
+
+```{r message = FALSE, warning=FALSE, comment = ""}
+ggplot(test) + 
+  geom_bar(aes(x = NumOfProducts, fill = Exited), position = "fill") + 
+  theme_bw() + 
+  xlab("Количество продуктов банка") +
+  ylab("Распределение категорий") +
+  scale_fill_discrete("Клиент ушел", labels = c("да", "нет"))
+```
+
++ для тренировочной выборки
+
+```{r message = FALSE, warning=FALSE, comment = ""}
+ggplot(train) + 
+  geom_bar(aes(x = NumOfProducts, fill = Exited), position = "fill") + 
+  theme_bw() + 
+  xlab("Количество продуктов банка") +
+  ylab("Распределение категорий") +
+  scale_fill_discrete("Клиент ушел", labels = c("да", "нет"))
+```
+
+В целом, разницы между тестовой и тренировочной выборкой особо нет. В обеих из них все клиенты, у кого есь 4 продукта, в 100% случаев ушли из банка. Также много ушедших среди тех, у кого уже есть 3 продукта.
+
+Так как мы имеем данные только о кредитной карте как о продукте, проверим, связан ли показатель количества продуктов с наличием этой карты. Также добавим переменную активности, чтобы посмотреть, пользуется ли клиент данной картой (предположительно, если клиент  совершает действия = активный, то и с кредитной картой тоже).
+
+```{r message = FALSE, warning=FALSE, comment = ""}
+exited %>% filter(NumOfProducts == "3") %>% group_by(NumOfProducts, HasCrCard, IsActiveMember, Exited) %>% count() 
+exited %>% filter(NumOfProducts == "4") %>% group_by(NumOfProducts, HasCrCard, IsActiveMember, Exited) %>% count() 
+```
+
+В обеих подборках большинство ушедших клиентов имеют кредитную карту и не пользуются ей. Поработаем с этими показателями.
+
+
+### Симуляция
+ 
+**Одним из решений** снижения уровня оттока клиентов может стать мотивация начать пользоваться кредитной картой. Это можно сделать, например, увеличением льготного периода по операциям, бесплатным обслуживанием или увеличением кредитного лимита - на усмотрение банка. Это и привлечет клиентов обратно или же не даст существующим клиентам передумать пользоваться услугами банка (а именно кредитной картой).
+
+Предположим, что 15% клиентов действительно заинтересовались новыми условиями и начали пользоваться кредитной картой, а значит стали активными пользователями.
+
+Посмотрим, что изменится в количественном соотношении:
+
+```{r message = FALSE, warning=FALSE, comment = ""}
+test_new = test
+set.seed(12345)
+test_new$IsActiveMember[test_new$IsActiveMember == "0"] = 
+  sample(c("0", "1"), # из чего выбираем
+         size = length(test_new$IsActiveMember[test_new$IsActiveMember == "0"]), # размер вектора
+         replace = T, # могут повторяться 
+         prob = c(0.85, 0.15)) # с какой вероятностью встретится, не точная вероятность
+
+predTest = predict(tree.wf, test_new)$.pred_class
+ggplot(data.frame(predTest)) + 
+  geom_bar(aes(x = predTest), alpha = 0.5, fill = "green") +
+  geom_bar(data = test, aes(x = Exited), alpha = 0.5, fill = "yellow") +
+  theme_bw() + 
+  xlab("Ушел ли клиент") +
+  ylab("Количество клиентов") 
+```
+
+Желтые столбцы - показатели оттока в начальной тестовой выборке, а зеленые - наши ожидания от симуляции.
+
+Таким образом, это решение может уменьшить отток клиентов, показатели улучшились. Банку рекоммендуется подумать над условиями обслуживания кредитных карт, чтобы вернуть ушедших клиентов обратно или предовратить дальнейший уход оставшихся клиентов.
+
+```{r message = FALSE, warning=FALSE, comment = ""}
+ex_33 = as.data.frame(predTest) %>% group_by(predTest) %>% summarise(num = n()) %>% rename(Exited = predTest)
+ex_33 = round(ex_33$num[2] / sum(ex_33$num) * 100, 2)
+ex_33
+```
+
+
+
+### Дэшборд
+
+Наш дэшборд для заказчика. Он должен отобразить информацию по клиентам банка и по оттоку.
+
+В "экспресс-данные" внесем:
+
++ страну с наибольшим количеством клиентов (чтобы знать, кто основной потребитель)
+
++ уровень оттока клиентов в выделенной подгруппе
+
++ уровень оттока после предположенийо решении проблемы оттока
+
+Также будут отображены интерактивные графики:
+
+1. Анализ данных выделенной подгруппы клиентов, где видно сколько человек ушло или осталось при условии разделения на количество продуктов и с возможностью фильтра по странам.
+
+```{r message = FALSE, warning=FALSE, comment = ""}
+library(crosstalk)
+library(plotly)
+
+exited1 = exited %>% group_by(NumOfProducts, Exited, Country) %>% summarise(n = n())
+exited1$Exited = ifelse(exited1$Exited == "1", "Ушел", "Остался")
+ex = SharedData$new(exited1)
+
+ex %>% 
+  plot_ly(x = ~NumOfProducts, y = ~n, color = ~Exited,
+            colors = c("#6AB187", "#484848"), 
+            type = 'bar', hoverinfo = "text") %>% 
+  layout(title = " ",
+         xaxis = list(title = "Количество продуктов банка"),
+         yaxis = list(title = "Количество клиентов")) 
+```
+
+2. Распределение оттока в зависимости от количества продуктов и активности клиента в интересующей нас подгруппе. 
+
+Рассматриваем данные подгруппы, так как с ними мы и работали при решении задачи.
+
+```{r message = FALSE, warning=FALSE, comment = ""}
+product = exited %>% group_by(NumOfProducts) %>% count()
+
+active1 = exited %>% group_by(NumOfProducts, IsActiveMember) %>% count() %>% filter(NumOfProducts == "1")
+active2 = exited %>% group_by(NumOfProducts, IsActiveMember) %>% count() %>% filter(NumOfProducts == "2")
+active3 = exited %>% group_by(NumOfProducts, IsActiveMember) %>% count() %>% filter(NumOfProducts == "3")
+active4 = exited %>% group_by(NumOfProducts, IsActiveMember) %>% count() %>% filter(NumOfProducts == "4")
+
+exite1 = exited %>% group_by(NumOfProducts, IsActiveMember, Exited) %>% count() %>% filter(NumOfProducts == "1")
+exite2 = exited %>% group_by(NumOfProducts, IsActiveMember, Exited) %>% count() %>% filter(NumOfProducts == "2")
+exite3 = exited %>% group_by(NumOfProducts, IsActiveMember, Exited) %>% count() %>% filter(NumOfProducts == "3")
+exite4 = exited %>% group_by(NumOfProducts, IsActiveMember, Exited) %>% count() %>% filter(NumOfProducts == "4")
+
+
+plot_ly(
+  # название переменных 
+  labels = c("Общее число", "1 продукт", "2 продукта", "3 продукта", "4 продукта", 
+             "Неактивный", "Активный", 
+             "Неактивный ", "Активный ", 
+             " Неактивный", " Активный", 
+             " Неактивный ", " Активный ", 
+             "Ушел", "Остался", "Ушел ", "Остался ", 
+             " Ушел", " Остался", " Ушел ", " Остался ", 
+             " Ушел  ", " Остался  ", "  Ушел  ", "  Остался  ", 
+             "  Ушел   ", "   Ушел  "),
+  # куда переменные выше вкладываются
+  parents = c("", "Общее число", "Общее число", "Общее число", "Общее число",
+              "1 продукт", "1 продукт",
+              "2 продукта", "2 продукта",
+              "3 продукта", "3 продукта",
+              "4 продукта", "4 продукта",
+              "Неактивный", "Неактивный", "Активный", "Активный", 
+              "Неактивный ", "Неактивный ", "Активный ", "Активный ", 
+              " Неактивный", " Неактивный", " Активный", " Активный", 
+              " Неактивный ", " Активный "),
+  # значения для переменных
+  values = c(sum(product$n), product$n, 
+             active1$n, active2$n, active3$n, active4$n,
+             exite1$n, exite2$n, exite3$n, exite4$n), 
+  type = 'sunburst',
+  branchvalues = 'total'
+) 
+```
+
+
+## Общие выводы
+
+В данном отчете мы проанализировали базу данных клиентов банка и постарались выяснить причины ухода клиентов. Мы рассмотрели подкатегорию граждан трех стран с заработной платой выше 1000, возрастом от 24 до 60 лет, которые сотрудничают с банком по крайней мере месяц.
+
+Проведя анализ оттока мы выяснили, что важными показателями является возраст клиента и количество имеющихся у него продуктов в банке. Также проверили дополнительные факторы влияния и увидели, что многие клиенты, имеющие кредитную карту и не пользующиеся ей, ушли от банка. Решением для сокращения оттока таких клиентов было предложение по мотивации клиента использовать кредитную карту, изменив условия обслуживания, которые являются наиболее привликательными, какими именно - решение за заказчиком. Однако мы проверили теорию и отток клиентов сократился почти в два раза с применением такой стратегии.
+

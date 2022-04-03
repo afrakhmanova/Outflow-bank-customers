@@ -1,0 +1,171 @@
+---
+title: 'Отток клиентов банка'
+author: "Рахманова Амина, afrakhmanova"
+output: 
+  flexdashboard::flex_dashboard:
+    theme: flatly
+    source_code: embed
+    orientation: rows
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(tidyverse)
+library(plotly)
+library(crosstalk)
+library(dplyr)
+library(ggplot2)
+library(tidymodels)
+library(vip)
+
+library(DBI)
+library(RMariaDB)
+con = dbConnect(RMariaDB::MariaDB(), 
+                user ='studentminor', 
+                password ='DataMinorHSE!2020', 
+                dbname ='bank', 
+                host ='34.88.193.134',
+                port = 3306)
+full = dbGetQuery(con, "SELECT Age, Balance, Country, NumOfProducts, HasCrCard, IsActiveMember, Exited
+                  FROM (profile 
+                        INNER JOIN country USING(CountryId) 
+                        INNER JOIN portfolio USING(CustomerId))")
+exited = dbGetQuery(con, "SELECT Age, Balance, Country, NumOfProducts, HasCrCard, IsActiveMember, Exited
+                  FROM (profile 
+                        INNER JOIN country USING(CountryId) 
+                        INNER JOIN portfolio USING(CustomerId))
+                  WHERE Age > 23 and Age <= 60 and EstimatedSalary > 1000 and Tenure > 0")
+dbDisconnect(con) 
+exited$Country = as.factor(exited$Country)
+exited$NumOfProducts = as.factor(exited$NumOfProducts)
+exited$HasCrCard = as.factor(exited$HasCrCard)
+exited$IsActiveMember = as.factor(exited$IsActiveMember)
+exited$Exited = as.factor(exited$Exited)
+
+set.seed(123) 
+split = initial_split(exited, prop = 0.8) 
+train = training(split) 
+test = testing(split)
+tree = decision_tree(
+  mode = "classification") %>%
+  set_engine("rpart")
+tree.wf = workflow() %>% 
+  add_model(tree) %>% 
+  add_formula(Exited ~.) %>% 
+  fit(data = train)
+
+test = test %>% 
+  mutate(Prediction = predict(tree.wf, test)$.pred_class)
+test_new = test
+set.seed(12345)
+test_new$IsActiveMember[test_new$IsActiveMember == "0"] = 
+  sample(c("0", "1"), # из чего выбираем
+         size = length(test_new$IsActiveMember[test_new$IsActiveMember == "0"]), # размер вектора
+         replace = T, # могут повторяться 
+         prob = c(0.85, 0.15)) # с какой вероятностью встретится, не точная вероятность
+predTest = predict(tree.wf, test_new)$.pred_class
+
+exited1 = exited %>% group_by(NumOfProducts, Exited, Country) %>% summarise(n = n())
+exited1$Exited = ifelse(exited1$Exited == "1", "Ушел", "Остался")
+ex = SharedData$new(exited1)
+
+product = exited %>% group_by(NumOfProducts) %>% count()
+
+active1 = exited %>% group_by(NumOfProducts, IsActiveMember) %>% count() %>% filter(NumOfProducts == "1")
+active2 = exited %>% group_by(NumOfProducts, IsActiveMember) %>% count() %>% filter(NumOfProducts == "2")
+active3 = exited %>% group_by(NumOfProducts, IsActiveMember) %>% count() %>% filter(NumOfProducts == "3")
+active4 = exited %>% group_by(NumOfProducts, IsActiveMember) %>% count() %>% filter(NumOfProducts == "4")
+
+exite1 = exited %>% group_by(NumOfProducts, IsActiveMember, Exited) %>% count() %>% filter(NumOfProducts == "1")
+exite2 = exited %>% group_by(NumOfProducts, IsActiveMember, Exited) %>% count() %>% filter(NumOfProducts == "2")
+exite3 = exited %>% group_by(NumOfProducts, IsActiveMember, Exited) %>% count() %>% filter(NumOfProducts == "3")
+exite4 = exited %>% group_by(NumOfProducts, IsActiveMember, Exited) %>% count() %>% filter(NumOfProducts == "4")
+```
+
+
+Inputs {.sidebar}
+-------------------------------------
+
+```{r}
+filter_checkbox("Country", "Страна", ex, ~Country)
+filter_checkbox("NumOfProducts", "Количество продуктов", ex, ~NumOfProducts)
+#filter_slider("Age", "Возраст клиента", ex, ~Age)
+#filter_slider("Balance", "Баланс на счету", ex, ~Balance)
+```
+
+Row {data-height=100}
+-------------------------------------
+
+### Страна с набольшим количеством клиентов   
+
+```{r}
+value1 = full %>% group_by(Country) %>% summarise(num = n())
+value1 = paste0(value1$Country[1], ": ", value1$num[1])
+valueBox(value1, icon = "fas fa-regular fa-globe", color = "primary")
+```
+
+### Отток клиентов в выделенной подгруппе
+
+```{r}
+value2 = test %>% group_by(Exited) %>% summarise(num = n())
+value2 = paste0(round(value2$num[2] / sum(value2$num) * 100, 2), "%")
+valueBox(value2, icon = "fas fa-duotone fa-chart-pie", color = "primary")
+```
+
+### Отток после изменения условий пользования кредитной картой
+
+```{r}
+value3 = as.data.frame(predTest) %>% group_by(predTest) %>% summarise(num = n())
+value3 = paste0(round(value3$num[2] / sum(value3$num) * 100, 2), "%")
+valueBox(value3, icon = "fas fa-arrow-circle-up", color = "primary")
+```
+
+
+Row {data-height=500}
+-----------------------------------------------------------------------
+
+### Анализ данных выделенной подгруппы клиентов
+
+```{r}
+ex %>% 
+  plot_ly(x = ~NumOfProducts, y = ~n, color = ~Exited,
+            colors = c("#6AB187", "#484848"), 
+            type = 'bar', hoverinfo = "text") %>% 
+  layout(title = " ",
+         xaxis = list(title = "Количество продуктов банка"),
+         yaxis = list(title = "Количество клиентов")) 
+```
+
+### Распределение оттока в зависимости от количества продуктов и активности клиента в интересующей подгруппе
+
+```{r}
+plot_ly(
+  # название переменных 
+  labels = c("Общее число", "1 продукт", "2 продукта", "3 продукта", "4 продукта", 
+             "Неактивный", "Активный", 
+             "Неактивный ", "Активный ", 
+             " Неактивный", " Активный", 
+             " Неактивный ", " Активный ", 
+             "Ушел", "Остался", "Ушел ", "Остался ", 
+             " Ушел", " Остался", " Ушел ", " Остался ", 
+             " Ушел  ", " Остался  ", "  Ушел  ", "  Остался  ", 
+             "  Ушел   ", "   Ушел  "),
+  # куда переменные выше вкладываются
+  parents = c("", "Общее число", "Общее число", "Общее число", "Общее число",
+              "1 продукт", "1 продукт",
+              "2 продукта", "2 продукта",
+              "3 продукта", "3 продукта",
+              "4 продукта", "4 продукта",
+              "Неактивный", "Неактивный", "Активный", "Активный", 
+              "Неактивный ", "Неактивный ", "Активный ", "Активный ", 
+              " Неактивный", " Неактивный", " Активный", " Активный", 
+              " Неактивный ", " Активный "),
+  # значения для переменных
+  values = c(sum(product$n), product$n, 
+             active1$n, active2$n, active3$n, active4$n,
+             exite1$n, exite2$n, exite3$n, exite4$n), 
+  type = 'sunburst',
+  branchvalues = 'total'
+)
+```
+
