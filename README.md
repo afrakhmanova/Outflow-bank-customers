@@ -1,4 +1,4 @@
-html code 
+view html  
 
 report: https://rawcdn.githack.com/afrakhmanova/Outflow-bank-customers/8ac2eeafd9b636bb92777bc873d048d6c74fbbe9/report_html.html 
 
